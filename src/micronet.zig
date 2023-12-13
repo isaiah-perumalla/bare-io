@@ -19,19 +19,49 @@ pub const PollEvent = packed struct(i16) {
 
     pub const READ: PollEvent = .{ .IN = true, .PRI = true };
     pub const WRITE: PollEvent = .{ .OUT = true };
+
+    pub fn is_readable(self: PollEvent) bool {
+        return self.IN or self.PRI;
+    }
 };
 
 pub fn PollRegistry(comptime T: type, comptime max_size: u10) type {
     return struct {
-        const Self = @This();
+        const Result = struct { fd: std.os.fd_t, events: PollEvent, tag: T };
 
+        const Self = @This();
+        const Callback = *const fn (self: *Self, fd: std.os.fd_t, tag: T, events: PollEvent) anyerror!usize;
         const TagList = std.BoundedArray(T, max_size);
         const PollFdList = std.BoundedArray(std.os.pollfd, max_size);
+
         pollFds: PollFdList,
         tags: TagList,
 
-        pub fn init(size: usize) !Self {
-            return Self{ .pollFds = try PollFdList.init(size), .tags = try TagList.init(size) };
+        pub fn init() !Self {
+            return Self{ .pollFds = try PollFdList.init(0), .tags = try TagList.init(0) };
+        }
+
+        pub fn poll_(self: *Self, timeout_millis: i32, results: []Result) !usize {
+            _ = results;
+            _ = timeout_millis;
+            _ = self;
+        }
+
+        pub fn poll(self: *Self, timeout_millis: i32, callback: Callback) !usize {
+            const size = try std.os.poll(self.pollFds.slice(), timeout_millis);
+            if (size == 0) return 0;
+            var processed: usize = 0;
+            var pollFds = self.pollFds.slice();
+            for (0.., pollFds) |idx, *ptr| {
+                if (ptr.revents != 0) {
+                    const events = ptr.revents;
+                    _ = try callback(self, ptr.fd, self.tags.get(idx), @bitCast(events));
+                    processed += 1;
+                }
+                ptr.revents = 0;
+                if (processed == size) break;
+            }
+            return size;
         }
 
         pub fn register(self: *Self, tag: T, fd: std.os.fd_t, interest: PollEvent) !void {
@@ -51,6 +81,18 @@ pub fn PollRegistry(comptime T: type, comptime max_size: u10) type {
             try self.pollFds.append(pollFd);
             try self.tags.append(tag);
         }
+
+        pub fn deregister(self: *Self, fd: std.os.fd_t) bool {
+            var pollFds = self.pollFds.slice();
+            for (0.., pollFds) |index, *pollFdPtr| {
+                if (pollFdPtr.fd == fd) {
+                    _ = self.tags.swapRemove(index);
+                    _ = self.pollFds.swapRemove(index);
+                    return true;
+                }
+            }
+            return false;
+        }
     };
 }
 
@@ -58,13 +100,13 @@ pub const Socket = struct {
     fd: std.os.socket_t,
     addr: std.net.Ip4Address,
 
-    pub fn accept(self: Socket) !Socket {
+    pub fn accept(fd: std.os.fd_t) !Socket {
         var client_addr: std.os.sockaddr.in = undefined; //holder for client address
         var addr_size: std.os.socklen_t = @sizeOf(std.os.sockaddr.in); //holder for size of address when filled
         const addr_ptr: *std.os.sockaddr = @ptrCast(&client_addr);
 
-        const fd = try std.os.accept(self.fd, addr_ptr, &addr_size, std.os.O.NONBLOCK);
-        return Socket{ .fd = fd, .addr = std.net.Ip4Address{ .sa = client_addr } };
+        const client_fd = try std.os.accept(fd, addr_ptr, &addr_size, std.os.O.NONBLOCK);
+        return Socket{ .fd = client_fd, .addr = std.net.Ip4Address{ .sa = client_addr } };
     }
 };
 pub fn create_tcp_sock(addr: std.net.Ip4Address) !Socket {
@@ -84,4 +126,10 @@ pub fn add(a: i32, b: i32) i32 {
 
 test "basic add functionality" {
     try testing.expect(add(3, 7) == 10);
+}
+
+test "test poll registry" {
+    const Registry = PollRegistry(u8, comptime 4);
+    var registry = try Registry.init(4);
+    try registry.register('C', 1, PollEvent.READ);
 }
