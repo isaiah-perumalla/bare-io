@@ -49,6 +49,13 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
     });
 
+    const dns_tests = b.addTest(.{
+        .root_source_file = .{ .path = "src/dnsq.zig" },
+        .target = target,
+        .optimize = optimize,
+    });
+    const run_dns_tests = b.addRunArtifact(dns_tests);
+
     const run_net_tests = b.addRunArtifact(net_tests);
 
     // This creates a build step. It will be visible in the `zig build --help` menu,
@@ -56,6 +63,7 @@ pub fn build(b: *std.Build) void {
     // This will evaluate the `test` step rather than the default, which is "install".
     const test_step = b.step("test", "Run library tests");
     test_step.dependOn(&run_net_tests.step);
+    test_step.dependOn(&run_dns_tests.step);
 
     const build_examples_step = b.step("examples", "Builds all examples");
     build_examples_step.dependOn(&b.addInstallArtifact(echo_example, .{}).step);

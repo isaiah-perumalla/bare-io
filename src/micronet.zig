@@ -25,29 +25,32 @@ pub const PollEvent = packed struct(i16) {
     }
 };
 
-pub fn PollRegistry(comptime T: type, comptime max_size: u10) type {
+pub fn PollRegistry(comptime max_size: u10) type {
     return struct {
-        const Result = struct { fd: std.os.fd_t, events: PollEvent, tag: T };
-
+        const Result = struct { fd: std.os.fd_t, events: PollEvent, io_handler: IoHandler };
+        const Callback = *const fn (pollReg: *Self, fd: std.os.fd_t, events: PollEvent) anyerror!usize;
         const Self = @This();
-        const Callback = *const fn (self: *Self, fd: std.os.fd_t, tag: T, events: PollEvent) anyerror!usize;
-        const TagList = std.BoundedArray(T, max_size);
+
+        pub const IoHandler = struct {
+            // ptr: *anyopaque,
+            callback: Callback,
+
+            pub fn fromFunc(cb: Callback) IoHandler {
+                return .{ .callback = cb };
+            }
+        };
+
+        const IoHandlers = std.BoundedArray(IoHandler, max_size);
         const PollFdList = std.BoundedArray(std.os.pollfd, max_size);
 
         pollFds: PollFdList,
-        tags: TagList,
+        ioHandles: IoHandlers,
 
         pub fn init() !Self {
-            return Self{ .pollFds = try PollFdList.init(0), .tags = try TagList.init(0) };
+            return Self{ .pollFds = try PollFdList.init(0), .ioHandles = try IoHandlers.init(0) };
         }
 
-        pub fn poll_(self: *Self, timeout_millis: i32, results: []Result) !usize {
-            _ = results;
-            _ = timeout_millis;
-            _ = self;
-        }
-
-        pub fn poll(self: *Self, timeout_millis: i32, callback: Callback) !usize {
+        pub fn poll_results(self: *Self, timeout_millis: i32, results: []Result) !usize {
             const size = try std.os.poll(self.pollFds.slice(), timeout_millis);
             if (size == 0) return 0;
             var processed: usize = 0;
@@ -55,7 +58,7 @@ pub fn PollRegistry(comptime T: type, comptime max_size: u10) type {
             for (0.., pollFds) |idx, *ptr| {
                 if (ptr.revents != 0) {
                     const events = ptr.revents;
-                    _ = try callback(self, ptr.fd, self.tags.get(idx), @bitCast(events));
+                    results[processed] = Result{ .events = @bitCast(events), .fd = ptr.fd, .io_handler = self.ioHandles.get(idx) };
                     processed += 1;
                 }
                 ptr.revents = 0;
@@ -64,29 +67,39 @@ pub fn PollRegistry(comptime T: type, comptime max_size: u10) type {
             return size;
         }
 
-        pub fn register(self: *Self, tag: T, fd: std.os.fd_t, interest: PollEvent) !void {
-            std.debug.assert(self.pollFds.len == self.tags.len);
+        pub fn poll(self: *Self, timeout_millis: i32) !usize {
+            var results: [max_size]Result = undefined;
+            const size = try self.poll_results(timeout_millis, results[0..]);
+
+            for (results[0..size]) |res| {
+                _ = try res.io_handler.callback(self, res.fd, res.events);
+            }
+            return size;
+        }
+
+        pub fn register(self: *Self, fd: std.os.fd_t, interest: PollEvent, ioHandler: IoHandler) !void {
+            std.debug.assert(self.pollFds.len == self.ioHandles.len);
             const events: i16 = @bitCast(interest);
             var pollFds = self.pollFds.slice();
             for (0.., pollFds) |index, *pollFdPtr| {
                 if (pollFdPtr.fd == fd) {
                     pollFdPtr.events = events;
                     pollFdPtr.revents = 0;
-                    self.tags.set(index, tag);
+                    self.ioHandles.set(index, ioHandler);
                     return;
                 }
             }
 
             const pollFd = std.os.pollfd{ .fd = fd, .events = events, .revents = 0 };
             try self.pollFds.append(pollFd);
-            try self.tags.append(tag);
+            try self.ioHandles.append(ioHandler);
         }
 
         pub fn deregister(self: *Self, fd: std.os.fd_t) bool {
             var pollFds = self.pollFds.slice();
             for (0.., pollFds) |index, *pollFdPtr| {
                 if (pollFdPtr.fd == fd) {
-                    _ = self.tags.swapRemove(index);
+                    _ = self.ioHandles.swapRemove(index);
                     _ = self.pollFds.swapRemove(index);
                     return true;
                 }
@@ -120,16 +133,8 @@ pub fn create_tcp_sock(addr: std.net.Ip4Address) !Socket {
     return Socket{ .addr = addr, .fd = sock };
 }
 
-pub fn add(a: i32, b: i32) i32 {
-    return a + b;
-}
-
-test "basic add functionality" {
-    try testing.expect(add(3, 7) == 10);
-}
-
 test "test poll registry" {
     const Registry = PollRegistry(u8, comptime 4);
-    var registry = try Registry.init(4);
+    var registry = try Registry.init();
     try registry.register('C', 1, PollEvent.READ);
 }
