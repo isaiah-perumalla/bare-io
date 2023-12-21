@@ -2,6 +2,8 @@ const std = @import("std");
 
 const testing = std.testing;
 
+const CallbackType = enum { method, function };
+
 pub const PollEvent = packed struct(i16) {
     IN: bool = false,
     PRI: bool = false,
@@ -28,15 +30,29 @@ pub const PollEvent = packed struct(i16) {
 pub fn PollRegistry(comptime max_size: u10) type {
     return struct {
         const Result = struct { fd: std.os.fd_t, events: PollEvent, io_handler: IoHandler };
-        const Callback = *const fn (pollReg: *Self, fd: std.os.fd_t, events: PollEvent) anyerror!usize;
+        const FuncCallback = *const fn (pollReg: *Self, fd: std.os.fd_t, events: PollEvent) anyerror!usize;
+        const MethodCallback = *const fn (ctx: *anyopaque, *Self, fd: std.os.fd_t, events: PollEvent) anyerror!usize;
+        const Callback = union(CallbackType) { method: MethodCallback, function: FuncCallback };
         const Self = @This();
 
         pub const IoHandler = struct {
-            // ptr: *anyopaque,
+            ptr: ?*anyopaque,
             callback: Callback,
 
-            pub fn fromFunc(cb: Callback) IoHandler {
-                return .{ .callback = cb };
+            pub fn fromFunc(cb: FuncCallback) IoHandler {
+                return .{ .ptr = null, .callback = .{ .function = cb } };
+            }
+
+            pub fn handle_event(self: IoHandler, pollReg: *Self, fd: std.os.fd_t, events: PollEvent) anyerror!usize {
+                switch (self.callback) {
+                    .function => |func| return func(pollReg, fd, events),
+                    .method => |method| if (self.ptr != null) {
+                        const ptr = self.ptr.?;
+                        return method(ptr, pollReg, fd, events);
+                    } else {
+                        unreachable;
+                    },
+                }
             }
         };
 
@@ -72,7 +88,7 @@ pub fn PollRegistry(comptime max_size: u10) type {
             const size = try self.poll_results(timeout_millis, results[0..]);
 
             for (results[0..size]) |res| {
-                _ = try res.io_handler.callback(self, res.fd, res.events);
+                _ = try res.io_handler.handle_event(self, res.fd, res.events);
             }
             return size;
         }

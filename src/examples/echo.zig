@@ -4,6 +4,8 @@ const micronet = @import("micronet");
 const SocketType = enum { Server, Client };
 const PollRegistry = micronet.PollRegistry(16);
 const IoHandler = PollRegistry.IoHandler;
+var echo_handler = EchoHandler{};
+
 pub fn main() !void {
     var args_iter = std.process.args();
 
@@ -16,7 +18,6 @@ pub fn main() !void {
     const server_sock = try micronet.create_tcp_sock(addr);
     defer std.os.close(server_sock.fd);
     var registry = try PollRegistry.init();
-    
 
     const callback = IoHandler.fromFunc(&server_accept);
     try registry.register(server_sock.fd, micronet.PollEvent.READ, callback);
@@ -39,8 +40,8 @@ fn server_accept(pollReg: *PollRegistry, fd: std.os.fd_t, events: micronet.PollE
     _ = events;
     if (micronet.Socket.accept(fd)) |client_sock| {
         std.debug.print("client connected {}\n", .{client_sock.addr});
-        const callback = IoHandler.fromFunc(&do_echo);
-        try pollReg.register(client_sock.fd, micronet.PollEvent.READ, callback);
+        const io_handler = echo_handler.io_handler();
+        try pollReg.register(client_sock.fd, micronet.PollEvent.READ, io_handler);
     } else |err| {
         std.debug.print("accept error  {} \n", .{err});
     }
@@ -48,26 +49,45 @@ fn server_accept(pollReg: *PollRegistry, fd: std.os.fd_t, events: micronet.PollE
     return 1;
 }
 
-fn do_echo(pollReg: *PollRegistry, fd: std.os.fd_t, events: micronet.PollEvent) anyerror!usize {
-    _ = events;
-    var buffer: [1024]u8 = undefined;
+/// Io Handler which can have state ful ctx
+/// need to have method to return IoHandler (compile time interface/static dispatch)
+const EchoHandler = struct {
+    echoed_bytes: usize = 0,
 
-    if (std.os.read(fd, buffer[0..])) |size| {
-        if (size == 0) {
-            close(pollReg, fd);
-        } else if (std.os.write(fd, buffer[0..size])) |written| {
-            if (written < size) {
-                std.debug.print("write not competed fd={d}, size={d}, written={d}\n", .{ fd, size, written });
+    pub fn do_echo(self: *EchoHandler, pollReg: *PollRegistry, fd: std.os.fd_t, events: micronet.PollEvent) anyerror!usize {
+        _ = events;
+        var buffer: [1024]u8 = undefined;
+
+        if (std.os.read(fd, buffer[0..])) |size| {
+            if (size == 0) {
+                close(pollReg, fd);
+            } else if (std.os.write(fd, buffer[0..size])) |written| {
+                if (written < size) {
+                    std.debug.print("write not competed fd={d}, size={d}, written={d}\n", .{ fd, size, written });
+                }
+                self.echoed_bytes += written;
+                if (self.echoed_bytes > 1024 * 1024) {
+                    std.debug.print("total bytes written = {d}", .{self.echoed_bytes});
+                }
+                return written;
+            } else |err| {
+                std.debug.print("write error {} closing connection {d}\n", .{ err, fd });
+                close(pollReg, fd);
             }
-            return written;
         } else |err| {
-            std.debug.print("write error {} closing connection {d}\n", .{ err, fd });
+            std.debug.print("read error {} \n", .{err});
             close(pollReg, fd);
-        }
-    } else |err| {
-        std.debug.print("read error {} \n", .{err});
-        close(pollReg, fd);
-    } //if (written < size) ?
+        } //if (written < size) ?
 
-    return 0;
-}
+        return 0;
+    }
+
+    fn handle_io(ptr: *anyopaque, pollReg: *PollRegistry, fd: std.os.fd_t, events: micronet.PollEvent) !usize {
+        const self: *EchoHandler = @ptrCast(@alignCast(ptr));
+        return do_echo(self, pollReg, fd, events);
+    }
+
+    pub fn io_handler(self: *EchoHandler) IoHandler {
+        return .{ .ptr = self, .callback = .{ .method = handle_io } };
+    }
+};
