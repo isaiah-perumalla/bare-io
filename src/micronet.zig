@@ -25,6 +25,10 @@ pub const PollEvent = packed struct(i16) {
     pub fn is_readable(self: PollEvent) bool {
         return self.IN or self.PRI;
     }
+
+    pub fn is_writable(self: PollEvent) bool {
+        return self.OUT;
+    }
 };
 
 pub fn PollRegistry(comptime max_size: u10) type {
